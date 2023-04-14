@@ -38,6 +38,18 @@
 #include "weaponinfo.h"
 #include "usercmd.h"
 #include "netadr.h"
+// START BOT
+#include "bot.h"
+
+void BotCreate(const char *skin, const char *name, const char *skill);
+extern int f_Observer;	// flag for observer mode
+extern int f_botskill;	// default bot skill level
+extern int f_botdontshoot;	// flag to disable targeting other bots
+extern respawn_t bot_respawn[32];
+float bot_check_time = 10.0;
+int min_bots = 0;
+int max_bots = 0;
+// END BOT
 
 extern DLL_GLOBAL ULONG		g_ulModelIndexPlayer;
 extern DLL_GLOBAL BOOL		g_fGameOver;
@@ -49,6 +61,8 @@ extern int giPrecacheGrunt;
 extern int gmsgSayText;
 
 extern int g_teamplay;
+BOOL botadded = false;
+extern bool bSlaveCoop;
 
 void LinkUserMessages( void );
 
@@ -58,7 +72,11 @@ void LinkUserMessages( void );
  */
 void set_suicide_frame(entvars_t* pev)
 {       
-	if (!FStrEq(STRING(pev->model), "models/player.mdl"))
+	if ( 
+		(!FStrEq(STRING(pev->model), "models/player.mdl")) || 
+		(!FStrEq(STRING(pev->model), "models/player/dm_slave/dm_slave.mdl")) ||
+		(!FStrEq(STRING(pev->model), "models/ginacol.mdl"))
+	   )
 		return; // allready gibbed
 
 //	pev->frame		= $deatha11;
@@ -78,6 +96,43 @@ called when a player connects to a server
 */
 BOOL ClientConnect( edict_t *pEntity, const char *pszName, const char *pszAddress, char szRejectReason[ 128 ]  )
 {	
+    int i;
+    int count = 0;
+
+    // check if this is NOT a bot joining the server...
+    if (strcmp(pszAddress, "127.0.0.1") != 0)
+    {
+       // don't try to add bots for 30 seconds, give client time to get added
+       bot_check_time = gpGlobals->time + 30.0;
+
+       for (i=0; i < 32; i++)
+       {
+          if (bot_respawn[i].is_used)  // count the number of bots in use
+             count++;
+       }
+
+       // if there are currently more than the minimum number of bots running
+       // then kick one of the bots off the server...
+       if ((min_bots != 0) && (count > min_bots))
+       {
+          for (i=0; i < 32; i++)
+          {
+             if (bot_respawn[i].is_used)  // is this slot used?
+             {
+                char cmd[40];
+
+                sprintf(cmd, "kick \"%s\"\n", bot_respawn[i].name);
+
+                bot_respawn[i].state = BOT_IDLE;
+
+                SERVER_COMMAND(cmd);  // kick the bot using (kick "name")
+
+                break;
+             }
+          }
+       }
+    }
+
 	return g_pGameRules->ClientConnected( pEntity, pszName, pszAddress, szRejectReason );
 
 // a client connecting during an intermission can cause problems
@@ -264,8 +319,8 @@ void Host_Say( edict_t *pEntity, int teamonly )
 	}
 
 // make sure the text has content
-	char *pc;
-	for ( pc = p; pc != NULL && *pc != 0; pc++ )
+	for ( char *pc = p; pc != NULL && *pc != 0; pc++ )
+
 	{
 		if ( isprint( *pc ) && !isspace( *pc ) )
 		{
@@ -386,6 +441,65 @@ void ClientCommand( edict_t *pEntity )
 	{
 		Host_Say( pEntity, 0 );
 	}
+	else if ( FStrEq(pcmd, "changeplayer" ) )	// do Decay's player change (e.g. controllable-bot and vise-versa)
+	{
+		if (g_pGameRules->IsCoOp())
+		{
+			CDecayRules *g_pDecayRules;
+			g_pDecayRules = (CDecayRules*)g_pGameRules;
+			g_pDecayRules->ChangePlayer();
+		}
+	}
+	else if ( FStrEq(pcmd, "changeplayer2" ) )	// change player_index of active player to test Decay in SP mode
+	{
+		if (g_pGameRules->IsCoOp())
+		{
+			CDecayRules *g_pDecayRules;
+			g_pDecayRules = (CDecayRules*)g_pGameRules;
+			if (g_pDecayRules->pPlayers[0]->m_iDecayId == 1)
+			{
+				g_pDecayRules->pPlayers[0]->m_iDecayId = 2;
+			//	if ( !FNullEnt( g_pDecayRules->pPlayers[1]->pev ))
+			//		g_pDecayRules->pPlayers[1]->m_iDecayId = 1;
+			}
+			else
+			{
+				g_pDecayRules->pPlayers[0]->m_iDecayId = 1;
+			//	if ( !FNullEnt( g_pDecayRules->pPlayers[1]->pev ))
+			//		g_pDecayRules->pPlayers[1]->m_iDecayId = 2;
+			}
+			ALERT( at_console, "Player 1 index changed to %d\n", g_pDecayRules->pPlayers[0]->m_iDecayId );
+			//if ( !FNullEnt( g_pDecayRules->pPlayers[1]->pev ))
+			//	ALERT( at_console, "Player 2 index changed to %d\n", g_pDecayRules->pPlayers[1]->m_iDecayId );
+		}
+	} 
+	else if ( FStrEq( pcmd, "euukraine" ) )
+	{
+		if ( g_pGameRules->IsCoOp() )
+		{
+			bool bUnlockAlien = strcmp( CMD_ARGV(1), "visafree" ) == 0;
+			CDecayRules *g_pDecayRules;
+			g_pDecayRules = (CDecayRules*)g_pGameRules;
+			g_pDecayRules->unlockMissions( bUnlockAlien );
+			g_pDecayRules->statsSave();
+		}
+	}
+	else if ( FStrEq( pcmd, "test1" ) )
+	{
+		MESSAGE_BEGIN(MSG_ALL, SVC_INTERMISSION);
+		MESSAGE_END();
+	}
+	else if ( FStrEq(pcmd, "stripall" ) )
+	{
+		if (g_pGameRules->IsCoOp())
+		{
+			CDecayRules *g_pDecayRules;
+			g_pDecayRules = (CDecayRules*)g_pGameRules;
+			g_pDecayRules->pPlayers[0]->PackAllItems();
+			if ( !FNullEnt(g_pDecayRules->pPlayers[1]->pev) )
+				g_pDecayRules->pPlayers[1]->PackAllItems();
+		}
+	}
 	else if ( FStrEq(pcmd, "say_team" ) )
 	{
 		Host_Say( pEntity, 1 );
@@ -431,6 +545,83 @@ void ClientCommand( edict_t *pEntity )
 	{
 		GetClassPtr((CBasePlayer *)pev)->SelectLastItem();
 	}
+// ***************************
+   // START BOT
+   else if (FStrEq(pcmd, "addbot" ))
+   {
+      if (!IS_DEDICATED_SERVER())
+      {
+         //If user types "addbot" in console, add a bot with skin and name
+		if (!bSlaveCoop)
+          BotCreate("ginacol", "Colette", 0);	// CMD_ARGV(1), CMD_ARGV(2), CMD_ARGV(3)
+		else
+		  BotCreate("player/dm_slave/dm_slave", "R-4913", 0);
+      }
+      else
+         CLIENT_PRINTF( pEntity, print_console, "addbot not allowed from client!\n" );
+   } 
+   else if (FStrEq(pcmd, "debugbot" ))
+   {
+		if (!bSlaveCoop)
+          BotCreate("ginacol", "Colette", 0);	// CMD_ARGV(1), CMD_ARGV(2), CMD_ARGV(3)
+		else
+		  BotCreate("player/dm_slave/dm_slave", "R-4913", 0);
+   }
+   
+   
+   /*
+   else if ( FStrEq(pcmd, "observer" ) )
+   {
+      if (!IS_DEDICATED_SERVER())
+      {
+         if (CMD_ARGC() > 1)  // is there an argument to the command?
+         {
+            f_Observer = atoi( CMD_ARGV(1) );  // set observer flag
+            CLIENT_PRINTF( pEntity, print_console, UTIL_VarArgs("\"observer\" set to %d\n", (int)f_Observer) );
+         }
+         else
+         {
+            CLIENT_PRINTF( pEntity, print_console, UTIL_VarArgs("\"observer\" is %d\n", (int)f_Observer) );
+         }
+      }
+      else
+         CLIENT_PRINTF( pEntity, print_console, "observer not allowed from client!\n" );
+   }*/
+   else if ( FStrEq(pcmd, "botskill" ) )
+   {
+      if (!IS_DEDICATED_SERVER())
+      {
+         if (CMD_ARGC() > 1)
+         {
+            f_botskill = atoi( CMD_ARGV(1) );  // set default bot skill level
+            CLIENT_PRINTF( pEntity, print_console, UTIL_VarArgs("\"botskill\" set to %d\n", (int)f_botskill) );
+         }
+         else
+         {
+            CLIENT_PRINTF( pEntity, print_console, UTIL_VarArgs("\"botskill\" is %d\n", (int)f_botskill) );
+         }
+      }
+      else
+         CLIENT_PRINTF( pEntity, print_console, "botskill not allowed from client!\n" );
+   }
+   else if ( FStrEq(pcmd, "botdontshoot" ) )
+   {
+      if (!IS_DEDICATED_SERVER())
+      {
+         if (CMD_ARGC() > 1)  // is there an argument to the command?
+         {
+            f_botdontshoot = atoi( CMD_ARGV(1) );  // set bot shoot flag
+            CLIENT_PRINTF( pEntity, print_console, UTIL_VarArgs("\"botdontshoot\" set to %d\n", (int)f_botdontshoot) );
+         }
+         else
+         {
+            CLIENT_PRINTF( pEntity, print_console, UTIL_VarArgs("\"botdontshoot\" is %d\n", (int)f_botdontshoot) );
+         }
+      }
+      else
+         CLIENT_PRINTF( pEntity, print_console, "botdontshoot not allowed from client!\n" );
+   }
+// ***************************
 	else if ( FStrEq( pcmd, "spectate" ) && (pev->flags & FL_PROXY) )	// added for proxy support
 	{
 		CBasePlayer * pPlayer = GetClassPtr((CBasePlayer *)pev);
@@ -511,11 +702,14 @@ void ClientUserInfoChanged( edict_t *pEntity, char *infobuffer )
 		}
 		else
 		{
-			UTIL_LogPrintf( "\"%s<%i><%s><%i>\" changed name to \"%s\"\n", 
+				// TODO: crashes here when changing name during gameplay
+			UTIL_LogPrintf( "\"%s\" changed name to \"%s\"\n", 
+			//UTIL_LogPrintf( "\"%s<%i><%s><%s>\" changed name to \"%s\"\n", 
 				STRING( pEntity->v.netname ), 
-				GETPLAYERUSERID( pEntity ), 
-				GETPLAYERAUTHID( pEntity ),
-				GETPLAYERUSERID( pEntity ), 
+			//	GETPLAYERUSERID( pEntity ), 
+			//	GETPLAYERAUTHID( pEntity ),
+				//GETPLAYERUSERID( pEntity ), 
+			//	g_engfuncs.pfnInfoKeyValue( infobuffer, "model" ),
 				g_engfuncs.pfnInfoKeyValue( infobuffer, "name" ) );
 		}
 	}
@@ -629,14 +823,355 @@ void ParmsChangeLevel( void )
 //
 void StartFrame( void )
 {
-	if ( g_pGameRules )
+	
+   // START BOT
+   static BOOL file_opened = FALSE;
+   static int length;
+   static char *pFileList, *aFileList;
+   static char cmd_line[80];
+   static char server_cmd[80];
+   static int index, i;
+   static float pause_time;
+   static float check_server_cmd = 0;
+   char *cmd, *arg1, *arg2, *arg3;
+   static float respawn_time = 0;
+   static float previous_time = 0.0;
+   char msg[120];
+   // END BOT
+   // START BOT - thanks Jehannum!
+   // loop through all the players...
+   for ( i = 1; i <= gpGlobals->maxClients; i++ )
+   {
+      CBaseEntity *pPlayer;
+      pPlayer = UTIL_PlayerByIndex( i );
+      if (!pPlayer)  // if invalid then continue with next index...
+         continue;
+      // check if this is a FAKECLIENT (i.e. is it a bot?)
+      if (FBitSet(pPlayer->pev->flags, FL_FAKECLIENT))
+      {
+         CBot *pBot = (CBot *)pPlayer;
+         // call the think function for the bot...
+         pBot->BotThink();
+      }
+   }
+   // END BOT
+   // START BOT
+   /*
+   if ((g_fGameOver) && (respawn_time < 1.0))
+   {
+      // if the game is over (time/frag limit) set the respawn time...
+      respawn_time = 5.0;
+      // check if any players are using the botcam...
+      for ( i = 1; i <= gpGlobals->maxClients; i++ )
+      {
+         CBasePlayer *pPlayer;
+         pPlayer = (CBasePlayer *)UTIL_PlayerByIndex( i );
+         if (!pPlayer)
+            continue;  // if invalid then continue with next index...
+         if (pPlayer->pBotCam)
+            pPlayer->pBotCam->Disconnect();
+      }
+   }*/
+   // check if a map was changed via "map" without kicking bots...
+   if (previous_time > gpGlobals->time)
+   {
+      bot_check_time = gpGlobals->time + 10.0;
+      for (index = 0; index < 32; index++)
+      {
+         if ((bot_respawn[index].is_used) &&  // is this slot used?
+             (bot_respawn[index].state != BOT_NEED_TO_RESPAWN))
+         {
+            // bot has already been "kicked" by server so just set flag
+            bot_respawn[index].state = BOT_NEED_TO_RESPAWN;
+            // if the map was changed set the respawn time...
+            respawn_time = 5.0;
+         }
+      }
+   }
+   // is new game started and time to respawn bots yet?
+   if ((!g_fGameOver) && (respawn_time > 1.0) &&
+       (gpGlobals->time >= respawn_time))
+   {
+      int index = 0;
+      bot_check_time = gpGlobals->time + 5.0;
+      // find bot needing to be respawned...
+      while ((index < 32) &&
+             (bot_respawn[index].state != BOT_NEED_TO_RESPAWN))
+         index++;
+      if (index < 32)
+      {
+         bot_respawn[index].state = BOT_IS_RESPAWNING;
+         bot_respawn[index].is_used = FALSE;      // free up this slot
+         // respawn 1 bot then wait a while (otherwise engine crashes)
+         BotCreate(bot_respawn[index].skin,
+                   bot_respawn[index].name,
+                   bot_respawn[index].skill);
+         respawn_time = gpGlobals->time + 1.0;  // set next respawn time
+      }
+      else
+      {
+         respawn_time = 0.0;
+      }
+   }
+   // END BOT
+   if ( g_pGameRules )
+   {
 		g_pGameRules->Think();
 
-	if ( g_fGameOver )
+			//if (!botadded)
+		//{
+		//	botadded = TRUE;
+		//	BotCreate("ginacol", "Colette", "1");			
+		//}
+/*
+      // START BOT
+      if (!file_opened)  // have we open bot.cfg file yet?
+      {
+         ALERT( at_console, "Executing bot.cfg\n" );
+         pFileList = (char *)LOAD_FILE_FOR_ME( "bot.cfg", &length);
+         file_opened = TRUE;
+         if (pFileList == NULL)
+            ALERT( at_console, "bot.cfg file not found\n" );
+         pause_time = gpGlobals->time;
+         index = 0;
+         cmd_line[index] = 0;  // null out command line
+      }
+      // if the bot.cfg file is still open and time to execute command...
+      while ((pFileList && *pFileList) && (pause_time <= gpGlobals->time))
+      {
+         while (*pFileList == ' ')  // skip any leading blanks
+            pFileList++;
+         while ((*pFileList != '\r') && (*pFileList != '\n') &&
+                (*pFileList != 0))
+         {
+            if (*pFileList == '\t')  // convert tabs to spaces
+               *pFileList = ' ';
+            cmd_line[index] = *pFileList;
+            pFileList++;
+            while ((cmd_line[index] == ' ') && (*pFileList == ' '))
+               pFileList++;  // skip multiple spaces
+            index++;
+         }
+	 
+	 if (*pFileList == '\r')
+         {
+            pFileList++; // skip the carriage return
+            pFileList++; // skip the linefeed
+         }
+         else if (*pFileList == '\n')
+         {
+            pFileList++; // skip the newline
+         }
+         cmd_line[index] = 0;  // terminate the command line
+         // copy the command line to a server command buffer...
+         strcpy(server_cmd, cmd_line);
+         strcat(server_cmd, "\n");
+         index = 0;
+         cmd = cmd_line;
+         arg1 = arg2 = arg3 = NULL;
+         // skip to blank or end of string...
+         while ((cmd_line[index] != ' ') && (cmd_line[index] != 0))
+            index++;
+	    
+	 if (cmd_line[index] == ' ')
+         {
+            cmd_line[index++] = 0;
+            arg1 = &cmd_line[index];
+            // skip to blank or end of string...
+            while ((cmd_line[index] != ' ') && (cmd_line[index] != 0))
+               index++;
+            if (cmd_line[index] == ' ')
+            {
+               cmd_line[index++] = 0;
+               arg2 = &cmd_line[index];
+               // skip to blank or end of string...
+               while ((cmd_line[index] != ' ') && (cmd_line[index] != 0))
+                  index++;
+               if (cmd_line[index] == ' ')
+               {
+                  cmd_line[index++] = 0;
+                  arg3 = &cmd_line[index];
+               }
+            }
+         }
+         index = 0;  // reset for next input line
+         if ((cmd_line[0] == '#') || (cmd_line[0] == 0))
+         {
+            continue;  // ignore comments or blank lines
+         }
+         else if (strcmp(cmd, "addbot") == 0)
+         {
+            BotCreate( arg1, arg2, arg3 );
+            // have to delay here or engine gives "Tried to write to
+            // uninitialized sizebuf_t" error and crashes...
+            pause_time = gpGlobals->time + 1;
+            break;
+         }
+         else if (strcmp(cmd, "botskill") == 0)
+         {
+            f_botskill = atoi( arg1 );  // set default bot skill level
+         }
+         else if (strcmp(cmd, "observer") == 0)
+         {
+            f_Observer = atoi( arg1 );  // set observer flag
+         }
+         else if (strcmp(cmd, "botdontshoot") == 0)
+         {
+            f_botdontshoot = atoi( arg1 );  // set bot shoot flag
+         }
+         else if (strcmp(cmd, "min_bots") == 0)
+         {
+            min_bots = atoi( arg1 );
+	    
+	    if (min_bots < 0)
+               min_bots = 0;
+            if (IS_DEDICATED_SERVER())
+            {
+               sprintf(msg, "min_bots set to %d\n", min_bots);
+               printf(msg);
+            }
+         }
+         else if (strcmp(cmd, "max_bots") == 0)
+         {
+            max_bots = atoi( arg1 );
+            if (max_bots >= gpGlobals->maxClients)
+               max_bots = gpGlobals->maxClients - 1;
+            if (IS_DEDICATED_SERVER())
+            {
+               sprintf(msg, "max_bots set to %d\n", max_bots);
+               printf(msg);
+            }
+         }
+         else if (strcmp(cmd, "pause") == 0)
+         {
+            pause_time = gpGlobals->time + atoi( arg1 );
+            break;
+         }
+         else
+         {
+            sprintf(msg, "executing server command: %s\n", server_cmd);
+            ALERT( at_console, msg );
+            if (IS_DEDICATED_SERVER())
+               printf(msg);
+            SERVER_COMMAND(server_cmd);
+         }
+      }
+      // if bot.cfg file is open and reached end of file, then close and free it
+      if (pFileList && (*pFileList == 0))
+      {
+         FREE_FILE(aFileList);
+         pFileList = NULL;
+      }
+	*/
+      // if time to check for server commands then do so...
+      if (check_server_cmd <= gpGlobals->time)
+      {
+         check_server_cmd = gpGlobals->time + 1.0;
+         char *cvar_bot = (char *)CVAR_GET_STRING( "bot" );
+         if ( cvar_bot && cvar_bot[0] )
+         {
+            strcpy(cmd_line, cvar_bot);
+            index = 0;
+            cmd = cmd_line;
+            arg1 = arg2 = arg3 = NULL;
+            // skip to blank or end of string...
+            while ((cmd_line[index] != ' ') && (cmd_line[index] != 0))
+               index++;
+            if (cmd_line[index] == ' ')
+            {
+               cmd_line[index++] = 0;
+               arg1 = &cmd_line[index];
+               // skip to blank or end of string...
+               while ((cmd_line[index] != ' ') && (cmd_line[index] != 0))
+                  index++;
+               if (cmd_line[index] == ' ')
+               {
+                  cmd_line[index++] = 0;
+                  arg2 = &cmd_line[index];
+                  // skip to blank or end of string...
+                  while ((cmd_line[index] != ' ') && (cmd_line[index] != 0))
+                     index++;
+                  if (cmd_line[index] == ' ')
+                  {
+                     cmd_line[index++] = 0;
+                     arg3 = &cmd_line[index];
+                  }
+               }
+            }
+            if (strcmp(cmd, "addbot") == 0)
+            {
+               printf("adding new bot...\n");
+               BotCreate( arg1, arg2, arg3 );
+            }
+            else if (strcmp(cmd, "botskill") == 0)
+            {
+               if (arg1 != NULL)
+               {
+                  printf("setting botskill to %d\n", atoi( arg1 ));
+                  f_botskill = atoi( arg1 );  // set default bot skill level
+               }
+               else
+                  printf("botskill is %d\n", f_botskill);
+            }
+            else if (strcmp(cmd, "botdontshoot") == 0)
+            {
+               if (arg1 != NULL)
+               {
+                  printf("setting botdontshoot to %d\n", atoi( arg1 ));
+                  f_botdontshoot = atoi( arg1 );  // set bot shoot flag
+               }
+               else
+                  printf("botdontshoot is %d\n", f_botdontshoot);
+            }
+            CVAR_SET_STRING("bot", "");
+         }
+      }
+      // END BOT
+   }
+   if ( g_fGameOver )
+   {
 		return;
-
+	   
+	      // START BOT
+      check_server_cmd = 0;
+      // END BOT
+   }
+	g_iSkillLevel = CVAR_GET_FLOAT("skill");
 	gpGlobals->teamplay = teamplay.value;
 	g_ulFrameCount++;
+	
+   // START BOT
+   // check if time to see if a bot needs to be created...
+   if (bot_check_time < gpGlobals->time)
+   {
+      int count = 0;
+      bot_check_time = gpGlobals->time + 5.0;
+      for ( i = 1; i <= gpGlobals->maxClients; i++ )
+      {
+         CBaseEntity *pPlayer;
+         pPlayer = UTIL_PlayerByIndex( i );
+         if (!pPlayer)
+            continue;  // if invalid then continue with next index...
+         if (pPlayer->pev->takedamage == DAMAGE_NO)
+            continue;  // if bot was kicked, don't count as a player...
+         count++;  // count the number of bots and players
+      }
+      // if there are currently less than the maximum number of "players"
+      // then add another bot using the default skill level...
+      if (count < max_bots)
+      {
+         BotCreate( NULL, NULL, NULL );
+      }
+   }
+   previous_time = gpGlobals->time;  // keep track of last time in StartFrame()
+   // END BOT
+// ******************************************************************
+	//if ( g_pGameRules )
+	//	g_pGameRules->Think();
+	//if ( g_fGameOver )
+	//	return;
+	//gpGlobals->teamplay = teamplay.value;
+	//g_ulFrameCount++;	
 }
 
 
@@ -735,6 +1270,7 @@ void ClientPrecache( void )
 	PRECACHE_SOUND("player/pl_long_jump.wav");
 
 	PRECACHE_MODEL("models/player.mdl");
+	PRECACHE_MODEL("models/player/dm_slave/dm_slave.mdl");
 
 	// hud sounds
 
@@ -754,6 +1290,43 @@ void ClientPrecache( void )
 	PRECACHE_SOUND("player/geiger2.wav");
 	PRECACHE_SOUND("player/geiger1.wav");
 
+	
+    if (!IS_DEDICATED_SERVER())
+    {
+		//
+		// Decay bot sounds
+		//
+		PRECACHE_SOUND( GI_SND1 );
+		PRECACHE_SOUND( GI_SND2 );
+		PRECACHE_SOUND( GI_SND3 );
+		PRECACHE_SOUND( GI_SND4 );
+		PRECACHE_SOUND( GI_SND5 );
+		PRECACHE_SOUND( CO_SND1 ); 
+		PRECACHE_SOUND( CO_SND2 ); 
+		PRECACHE_SOUND( CO_SND3 ); 
+		PRECACHE_SOUND( CO_SND4 ); 
+		PRECACHE_SOUND( CO_SND5 ); 
+		//
+		// joy after successful enemy kill
+		//
+		PRECACHE_SOUND( CO_TNT1 );
+		PRECACHE_SOUND( CO_TNT2 );
+		PRECACHE_SOUND( CO_TNT3 );
+		PRECACHE_SOUND( CO_TNT4 ); 
+		PRECACHE_SOUND( CO_TNT5 ); 
+		PRECACHE_SOUND( GI_TNT1 ); 
+		PRECACHE_SOUND( GI_TNT2 ); 
+		PRECACHE_SOUND( GI_TNT3 ); 
+		PRECACHE_SOUND( GI_TNT4 ); 
+		PRECACHE_SOUND( GI_TNT5 ); 
+		PRECACHE_SOUND( USE_TEAMPLAY_SND ); 
+		PRECACHE_SOUND( USE_TEAMPLAY_LATER_SND ); 
+		PRECACHE_SOUND( USE_TEAMPLAY_ENEMY_SND ); 
+		//
+		// end of Decay bot sounds
+		//
+	}
+	
 	if (giPrecacheGrunt)
 		UTIL_PrecacheOther("monster_human_grunt");
 }
@@ -770,7 +1343,7 @@ const char *GetGameDescription()
 	if ( g_pGameRules ) // this function may be called before the world has spawned, and the game rules initialized
 		return g_pGameRules->GetGameDescription();
 	else
-		return "\"YA PS2 Half-Life 1.1\"";
+		return "Hazard Team";
 }
 
 /*
